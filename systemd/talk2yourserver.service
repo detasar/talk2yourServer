@@ -1,0 +1,55 @@
+[Unit]
+Description=Talk2YourServer - Telegram Bot for Server Management
+Documentation=https://github.com/yourusername/talk2yourServer
+After=network-online.target docker.service postgresql.service
+Wants=network-online.target
+
+# Restart limits: max 5 restarts in 5 minutes
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# Replace with your username
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+
+# Replace with your installation path
+WorkingDirectory=/home/YOUR_USERNAME/talk2yourServer
+
+# Environment setup
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/YOUR_USERNAME
+
+# Load environment variables from .env file
+EnvironmentFile=/home/YOUR_USERNAME/talk2yourServer/.env
+
+# Start command - adjust python path as needed
+# Option 1: System Python
+# ExecStart=/usr/bin/python3 src/bot.py
+
+# Option 2: Virtual environment
+# ExecStart=/home/YOUR_USERNAME/talk2yourServer/venv/bin/python src/bot.py
+
+# Option 3: Conda environment
+ExecStart=/bin/bash -c 'source /home/YOUR_USERNAME/miniconda3/bin/activate YOUR_ENV && exec python src/bot.py'
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Systemd watchdog - restarts if bot doesn't respond within 2 minutes
+WatchdogSec=120
+NotifyAccess=all
+
+# Resource limits (adjust as needed)
+MemoryMax=2G
+
+# Logging - both to journal and file
+StandardOutput=append:/home/YOUR_USERNAME/talk2yourServer/logs/bot.log
+StandardError=append:/home/YOUR_USERNAME/talk2yourServer/logs/bot.log
+SyslogIdentifier=talk2yourserver
+
+[Install]
+WantedBy=multi-user.target
