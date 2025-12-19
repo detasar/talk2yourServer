@@ -16,6 +16,8 @@ Usage:
 """
 
 import asyncio
+import atexit
+import fcntl
 import logging
 import os
 import signal
@@ -24,6 +26,71 @@ from pathlib import Path
 
 # Add the src directory to path for absolute imports
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+# =============================================================================
+# SINGLE INSTANCE LOCK - Prevents duplicate bot instances
+# =============================================================================
+class SingleInstance:
+    """
+    Ensures only one instance of the bot runs at a time using file locking.
+    Uses fcntl.flock() which is automatically released when process dies.
+    """
+
+    def __init__(self, lockfile: str = None):
+        self.lockfile = lockfile or Path(__file__).parent / '.bot.lock'
+        self.fd = None
+        self.locked = False
+
+    def acquire(self) -> bool:
+        """Try to acquire exclusive lock. Returns True if successful."""
+        try:
+            # Open in r+ mode first to read existing PID, create if not exists
+            if os.path.exists(self.lockfile):
+                self.fd = open(self.lockfile, 'r+')
+            else:
+                self.fd = open(self.lockfile, 'w')
+
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # Got the lock - write our PID
+            self.fd.seek(0)
+            self.fd.truncate()
+            self.fd.write(str(os.getpid()))
+            self.fd.flush()
+            self.locked = True
+            return True
+        except (IOError, OSError):
+            # Another instance has the lock
+            if self.fd:
+                self.fd.close()
+                self.fd = None
+            return False
+
+    def get_running_pid(self) -> str:
+        """Get PID of the running instance from lock file."""
+        try:
+            with open(self.lockfile, 'r') as f:
+                return f.read().strip()
+        except:
+            return "unknown"
+
+    def release(self):
+        """Release the lock."""
+        if self.fd and self.locked:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+                self.fd.close()
+                # Remove lock file
+                if os.path.exists(self.lockfile):
+                    os.unlink(self.lockfile)
+            except:
+                pass
+            self.locked = False
+
+
+# Global instance lock
+_instance_lock = SingleInstance()
 
 from telegram import Update
 from telegram.ext import (
@@ -347,10 +414,25 @@ async def post_shutdown(app: Application) -> None:
 def main():
     """Main entry point"""
 
+    # =========================================================================
+    # SINGLE INSTANCE CHECK - Exit if another instance is running
+    # =========================================================================
+    if not _instance_lock.acquire():
+        print("ERROR: Another bot instance is already running!")
+        print("Kill the other instance first or wait for it to stop.")
+        print(f"Running instance PID: {_instance_lock.get_running_pid()}")
+        sys.exit(1)
+
+    # Register cleanup on exit
+    atexit.register(_instance_lock.release)
+
+    logger.info(f"Bot starting with PID {os.getpid()}")
+
     # Check token
     if not config.telegram_token:
         print("ERROR: TELEGRAM_BOT_TOKEN is not set!")
         print("Please add TELEGRAM_BOT_TOKEN to your .env file.")
+        _instance_lock.release()
         sys.exit(1)
 
     # Check allowed users
@@ -378,11 +460,15 @@ def main():
     logger.info(f"Allowed users: {config.allowed_users}")
     logger.info(f"Admin users: {config.admin_users}")
 
-    # Run with polling
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
-    )
+    try:
+        # Run with polling
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+    finally:
+        # Ensure lock is released on exit
+        _instance_lock.release()
 
 
 if __name__ == "__main__":

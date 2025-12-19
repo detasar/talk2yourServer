@@ -69,3 +69,6 @@ telegram_uploads/
 *.tmp
 *.temp
 /tmp/
+
+# Bot lock file (single instance)
+.bot.lock

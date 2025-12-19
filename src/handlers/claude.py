@@ -7,6 +7,7 @@ Supports session continuity with -c flag.
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from datetime import datetime
@@ -19,6 +20,8 @@ from telegram.ext import ContextTypes
 from config import config
 from security import require_auth
 from db import db
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeCodeRunner:
@@ -85,6 +88,8 @@ class ClaudeCodeRunner:
         if allowed_tools:
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
 
+        logger.info(f"Starting Claude CLI: {' '.join(cmd[:5])}...")
+
         self.current_process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -95,6 +100,7 @@ class ClaudeCodeRunner:
 
         try:
             buffer = ""
+            has_output = False
             while True:
                 try:
                     line = await asyncio.wait_for(
@@ -124,6 +130,7 @@ class ClaudeCodeRunner:
                             if block.get("type") == "text":
                                 text = block.get("text", "")
                                 buffer += text
+                                has_output = True
                                 if len(buffer) >= 500:
                                     yield buffer
                                     buffer = ""
@@ -134,25 +141,29 @@ class ClaudeCodeRunner:
                         if delta.get("type") == "text_delta":
                             text = delta.get("text", "")
                             buffer += text
+                            has_output = True
                             if len(buffer) >= 500:
                                 yield buffer
                                 buffer = ""
 
                     elif msg_type == "result":
                         # Final result
+                        has_output = True
                         if buffer:
                             yield buffer
                             buffer = ""
 
                         # Include cost info if available
-                        cost = data.get("cost_usd")
+                        cost = data.get("total_cost_usd")
                         if cost:
                             yield f"\n\n[Cost: ${cost:.4f}]"
+                            logger.info(f"Claude completed, cost: ${cost:.4f}")
                         break
 
                 except json.JSONDecodeError:
                     # Plain text output
                     buffer += line_str + "\n"
+                    has_output = True
                     if len(buffer) >= 500:
                         yield buffer
                         buffer = ""
@@ -161,9 +172,20 @@ class ClaudeCodeRunner:
             if buffer:
                 yield buffer
 
+            # Check stderr if no output was received
+            if not has_output:
+                stderr_data = await self.current_process.stderr.read()
+                if stderr_data:
+                    stderr_text = stderr_data.decode('utf-8').strip()
+                    logger.error(f"Claude CLI stderr: {stderr_text}")
+                    yield f"Error: {stderr_text[:500]}"
+                else:
+                    logger.warning("Claude CLI returned no output")
+                    yield "No response from Claude. Please try again."
+
             # Mark that we now have a session for future -c usage
-            # Note: user_id is available in closure from run_prompt args
-            await self.set_session(user_id, True)
+            if has_output:
+                await self.set_session(user_id, True)
 
         finally:
             self.is_running = False
@@ -392,6 +414,8 @@ async def handle_claude_command(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     user_has_session = await claude_runner.has_session(user_id)
     session_info = "(continuing)" if (user_has_session and not force_new) else "(new session)"
+
+    logger.info(f"Claude command from user {user_id}: {message[:50]}... {session_info}")
     progress_msg = await update.message.reply_text(f"Claude working... {session_info}")
 
     full_response = ""
@@ -413,9 +437,11 @@ async def handle_claude_command(update: Update, context: ContextTypes.DEFAULT_TY
                 last_update_len = len(full_response)
 
         # Send final response
+        logger.info(f"Claude response length: {len(full_response)} chars")
         await send_long_message(update, progress_msg, full_response)
 
     except Exception as e:
+        logger.error(f"Claude command error: {str(e)}", exc_info=True)
         try:
             await progress_msg.edit_text(f"Error: {str(e)}")
         except:
